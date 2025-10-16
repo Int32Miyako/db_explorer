@@ -308,15 +308,10 @@ func (e *DbExplorer) getAllTableData(tableName string) ([]map[string]any, error)
 		return nil, err
 	}
 
-	// получаем мета-информацию по колонкам, чтобы знать их типы
-	columnsInfo, err := e.getColumnsInfo(tableName)
+	// Берём типы колонок напрямую из курсора
+	colTypes, err := rows.ColumnTypes()
 	if err != nil {
 		return nil, err
-	}
-	// мапим имя колонки -> тип (как строку из MySQL, например: "int(11)")
-	columnNameToType := make(map[string]string, len(columnsInfo))
-	for _, c := range columnsInfo {
-		columnNameToType[c.ColumnName] = c.ColumnType
 	}
 
 	kolColumns := len(arrNamesColumns)
@@ -345,18 +340,16 @@ func (e *DbExplorer) getAllTableData(tableName string) ([]map[string]any, error)
 				rowMap[colName] = nil // NULL в БД
 			} else {
 				valStr := string(rawRow[i])
-				colType := columnNameToType[colName]
-
-				// если тип колонки целочисленный — конвертируем значение в int
-				if strings.HasPrefix(colType, "int") || strings.HasPrefix(colType, "tinyint") || strings.HasPrefix(colType, "smallint") || strings.HasPrefix(colType, "mediumint") || strings.HasPrefix(colType, "bigint") {
+				// ColumnTypes может вернуть имя типа в разных регистрах/вариантах (INT, BIGINT, TINYINT)
+				colDatabaseType := strings.ToLower(colTypes[i].DatabaseTypeName())
+				if strings.HasPrefix(colDatabaseType, "int") || strings.HasPrefix(colDatabaseType, "tinyint") || strings.HasPrefix(colDatabaseType, "smallint") || strings.HasPrefix(colDatabaseType, "mediumint") || strings.HasPrefix(colDatabaseType, "bigint") {
 					if n, err := strconv.ParseInt(valStr, 10, 64); err == nil {
 						rowMap[colName] = int(n)
 					} else {
-						// если по какой-то причине не распарсили — отдадим как строку
 						rowMap[colName] = valStr
 					}
 				} else {
-					rowMap[colName] = valStr // для остальных типов оставляем строку
+					rowMap[colName] = valStr
 				}
 			}
 		}
