@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -23,43 +24,14 @@ type DbExplorer struct {
 	columnsInfo map[string][]ColumnInfo // по названию таблички вернет информацию всех его колонок
 }
 
-func (e *DbExplorer) getColumnsInfoByTableName(tableName string) ([]ColumnInfo, error) {
-
-	rows, err := e.db.Query(
-		`
-			SELECT 
-			    COLUMN_NAME,
-			    COLUMN_TYPE,
-			    IS_NULLABLE,
-			    COLUMN_DEFAULT
-			FROM information_schema.columns
-			WHERE table_schema = ? AND table_name = ?
-			ORDER BY ordinal_position;
-`, e.schemaName, tableName)
-	if err != nil {
-		fmt.Println(err)
-		return nil, err
-	}
-	defer rows.Close()
-
-	var result []ColumnInfo
-	for rows.Next() {
-		var c ColumnInfo
-		if err := rows.Scan(&c.ColumnName, &c.ColumnType, &c.IsNullable, &c.DefaultValue); err != nil {
-			return nil, err
-		}
-		result = append(result, c)
-	}
-
-	return result, nil
-}
-
 type ColumnInfo struct {
 	ColumnName   string
 	ColumnType   string
-	IsNullable   string
+	IsNullable   bool
 	DefaultValue sql.NullString
 }
+
+type Response map[string]any
 
 // GetNumberOfQuestions
 // чтобы добавить ровно столько ? сколько нужно вставить в запрос
@@ -69,27 +41,11 @@ func (e *DbExplorer) GetNumberOfQuestions() int {
 	return len(e.columnNames)
 }
 
-/* TODO LIST
+/*
+TODO LIST
 TODO: написать бд которая бы работала с любыми динамическими данными
 TODO  проинициализировать мапу в explorer может быть и в ините но хз где лучше
 TODO  написать функцию которая будет сверять что таблица которую использовал пользователь в запросе вообще существует
-TODO
-TODO
-TODO
-
-
-ниже писал ментор
-> Артем Уткин:
-привет, ну тут чуть сложнее, чем совсем элементарный апи из-за "динамичности"
-те ты в коде не должен завязываться на конкретные таблицы и поля, ты должен получить их от самой бд
-
-проверить какие таблицы есть, какие поля есть в таблице и тд
-
-> Артем Уткин:
-итерационно можно сначала хотя бы распечатать какие есть таблицы и какие в них поля
-от этого отталкиваться и далее по тестам идти
-
-учитывай что я учусь и мне все необходимо пояснять
 */
 
 func (e *DbExplorer) IsTableExists(tableName string) bool {
@@ -103,81 +59,110 @@ func (e *DbExplorer) IsTableExists(tableName string) bool {
 }
 
 func (e *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	var resp map[string]any
 	// r.URL.Path - Путь (часть после хоста) = "/users/5"
 	path := strings.Trim(r.URL.Path, "/") // на случай если "/users/5/ "
 	parts := strings.Split(path, "/")
+	var tableName string
+	var id int
+	if len(parts) == 1 && parts[0] != "" {
+		tableName = parts[0]
+	}
+	if len(parts) == 2 && parts[1] != "" {
+		id, _ = strconv.Atoi(parts[1])
+	}
 
 	switch r.Method {
 	case "GET":
+		// 3 функции получится
 		if path == "" {
 			tableNames, err := e.getAllTableNames()
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 			}
 
-			for _, tableName := range tableNames {
-				_, err := w.Write([]byte(tableName))
-				if err != nil {
-					return
-				}
+			// Формируем структуру для ответа
+			resp = Response{
+				"response": Response{
+					"tables": tableNames,
+				},
 			}
+			jsonTableNames, _ := json.Marshal(resp)
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(jsonTableNames)
+
+			return
 		}
 
 		// GET /$table?limit=5&offset=7
 		if len(parts) == 1 {
+
+			if !e.IsTableExists(tableName) {
+				w.WriteHeader(http.StatusNotFound)
+				resp = Response{
+					"error": "unknown table",
+				}
+
+				jsonResponse, _ := json.Marshal(resp)
+				w.Header().Set("Content-Type", "application/json")
+				w.Write(jsonResponse)
+
+				return
+			}
+
 			params := r.URL.Query()
-			limit, _ := strconv.Atoi(params.Get("limit"))
-			offset, _ := strconv.Atoi(params.Get("offset"))
 
-			if limit < 0 || limit > 25 {
-				limit = 5
+			limit := 5
+			offset := 0
+
+			// с гпт дописал
+			if v := params.Get("limit"); v != "" {
+				var err error
+				limit, err = strconv.Atoi(v)
+				if err != nil || limit < 0 {
+					limit = 5
+				}
 			}
 
-			if offset < 0 {
-				offset = 0
+			if v := params.Get("offset"); v != "" {
+				var err error
+				offset, err = strconv.Atoi(v)
+				if err != nil || offset < 0 {
+					offset = 0
+				}
 			}
+
+			listOfRecords, err := e.getListOfRecords(limit, offset, tableName)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+
+			// Формируем структуру для ответа
+			resp := Response{
+				"response": Response{
+					"records": listOfRecords,
+				},
+			}
+			jsonTableNames, _ := json.Marshal(resp)
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(jsonTableNames)
 		}
 
 		//  GET /$table/$id
 		if len(parts) == 2 {
-			tableName := parts[0]
-			id := parts[1]
-			row := e.db.QueryRow("SELECT * FROM ? WHERE id=?", tableName, id)
+			// Имя таблицы через sprintf, значение id через плейсхолдер
+			query := fmt.Sprintf("SELECT * FROM `%s` WHERE id=?", tableName)
+			row := e.db.QueryRow(query, id)
 
+			// TODO: Здесь нужно правильно обработать результат
 			row.Scan(&id)
 		}
 
 	case "POST":
-		// создаёт новую запись, данный по записи в теле запроса (POST-параметры)
-		//POST /$table
-		tableName := parts[0]
-		if !e.IsTableExists(tableName) {
-			return
+		_, err := e.createTable(tableName)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
-
-		stringsQuestions := `(`
-		for i := e.GetNumberOfQuestions(); i > 0; i-- {
-			stringsQuestions += ` ?,`
-		}
-		stringsQuestions += ")"
-
-		// лютый бред я конечно написал наверное, как проверить сразу работу пока что хз
-		// TODO: нужно еще один цикл запустить по которому бы проставлялись в функцию значения а это мб массив
-		// причем сначала идут названия колонок что норм, а потом и их значения что уже не приятно
-		// т к надо проставить пустые значения а типов я не знаю, (пустой интерфейс?)
-		// TODO: выяснить defaultValuesOfColumns кроме их названий в добавить переменную в explorer
-
-		var defaultValuesOfColumns []string
-		for i := e.GetNumberOfQuestions(); i > 0; i-- {
-			defaultValuesOfColumns = append(defaultValuesOfColumns, e.columnsInfo[tableName][i].ColumnType)
-		}
-
-		idx, _ := e.db.Exec(
-			`INSERT INTO ? `+stringsQuestions+" VALUES "+stringsQuestions, e.columnNames, e.schemaName)
-
-		lastId, _ := idx.LastInsertId()
-		fmt.Fprintf(w, strconv.Itoa(int(lastId)))
-
 	case "PUT":
 		// PUT /$table/$id
 
@@ -199,19 +184,12 @@ func NewDbExplorer(db *sql.DB) (*DbExplorer, error) {
 }
 
 func (e *DbExplorer) getAllTableNames() ([]string, error) {
-	schema, _ := e.currentSchema()
-
-	// row, _ := rows.Columns() // получает названия колонок
-	rows, err := e.db.Query(
-		`
-    	SELECT table_name
-    	FROM information_schema.tables
-    	WHERE table_schema = ?;
-`, schema)
+	// Простая команда SHOW TABLES вместо сложного information_schema
+	rows, err := e.db.Query("SHOW TABLES")
 	if err != nil {
 		return nil, err
 	}
-	rows.Close()
+	defer rows.Close()
 
 	var resultTables []string
 	for rows.Next() {
@@ -219,7 +197,6 @@ func (e *DbExplorer) getAllTableNames() ([]string, error) {
 		if err := rows.Scan(&tableName); err != nil {
 			return nil, err
 		}
-
 		resultTables = append(resultTables, tableName)
 	}
 
@@ -227,44 +204,147 @@ func (e *DbExplorer) getAllTableNames() ([]string, error) {
 	return resultTables, rows.Err()
 }
 
-func (e *DbExplorer) getColumnNames(tableName string) ([]string, error) {
+func (e *DbExplorer) isTableExist(tableName string) bool {
+	tableNames, _ := e.getAllTableNames()
+	for _, table := range tableNames {
+		if tableName == table {
+			return true
+		}
+	}
 
-	rows, err := e.db.Query(`
-      SELECT COLUMN_NAME 
-      FROM INFORMATION_SCHEMA.COLUMNS 
-      WHERE TABLE_NAME = ?; 
-`, tableName)
+	return false
+}
+
+func (e *DbExplorer) getColumnsInfo(tableName string) ([]ColumnInfo, error) {
+	query := fmt.Sprintf("SHOW FULL COLUMNS FROM `%s`", tableName)
+	rows, err := e.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var resultColumns []ColumnInfo
+	for rows.Next() {
+		var columnName, columnType, collation, null, key, extra, privileges, comment string
+		var defaultValue sql.NullString
+
+		if err = rows.Scan(&columnName, &columnType, &collation, &null, &key, &defaultValue, &extra, &privileges, &comment); err != nil {
+			return nil, err
+		}
+
+		isNullable := null == "YES"
+
+		resultColumns = append(resultColumns,
+			ColumnInfo{
+				ColumnName:   columnName,
+				ColumnType:   columnType,
+				IsNullable:   isNullable,
+				DefaultValue: defaultValue,
+			})
+	}
+
+	if e.columnsInfo == nil {
+		e.columnsInfo = make(map[string][]ColumnInfo, len(resultColumns))
+	}
+	e.columnsInfo[tableName] = resultColumns
+
+	return resultColumns, err
+}
+
+/*
+// что то что писал я
+func (e *DbExplorer) getAllTableData(tableName string) ([][]string, error) {
+	// Имя таблицы через sprintf, НЕ через плейсхолдер
+	query := fmt.Sprintf("SELECT * FROM `%s`", tableName)
+	rows, err := e.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	columnsInfo, err := e.getColumnsInfo(tableName)
+	// имея всю инфу что можно сделать?
+	// можно пробежаться по инфе колонок
+	// но нужно и достать данные
+	// для того чтобы достать данные надо получить неизвестное количество переменных
+	// известное кол-во переменных и равное длине массива columnsInfo
+	// лист наллПтров как предлагал гпт
+
+	// https://qna.habr.com/q/983721
+	// короче вот решение, сам я придумать ничего не могу
+	// ниже то самое решение
+
+	// создаем массив названий столбцов таблицы
+	arrNamesColumns, _ := rows.Columns()
+
+	// получаем количество столбцов
+	kolColumns := len(arrNamesColumns)
+	// создаем отображения которое по ключу (названию столбца) будет хранить срез всех записей данного столбца
+	resMap := make(map[string][]interface{}, kolColumns)
+
+	listOfInterfaces := make([]interface{}, len(columnsInfo))
+
+	for rows.Next() {
+		rows.Scan(listOfInterfaces...)
+	}
+
+	return nil, nil
+}
+*/
+
+// []map[string]any это массив всех записей таблицы
+func (e *DbExplorer) getAllTableData(tableName string) ([]map[string]any, error) {
+	// Имя таблицы через sprintf, НЕ через плейсхолдер
+	query := fmt.Sprintf("SELECT * FROM `%s`", tableName)
+	rows, err := e.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	// получаем названия колонок
+	arrNamesColumns, err := rows.Columns()
 	if err != nil {
 		return nil, err
 	}
 
-	rows.Close()
+	kolColumns := len(arrNamesColumns)
 
-	var resultColumns []string
+	// создаём массив для хранения текущей строки
+	// sql.RawBytes безопасно использовать для временного хранения
+	rawRow := make([]sql.RawBytes, kolColumns)
+	scanArgs := make([]interface{}, kolColumns)
+	for i := range rawRow {
+		scanArgs[i] = &rawRow[i] // прокидываем указатели в Scan
+	}
+
+	var records []map[string]interface{}
+
+	// перебираем все строки таблицы
 	for rows.Next() {
-		var columnName string
-		if err := rows.Scan(&columnName); err != nil {
+		// считываем текущую строку
+		if err = rows.Scan(scanArgs...); err != nil {
 			return nil, err
 		}
-		resultColumns = append(resultColumns, columnName)
+
+		// создаём map для одной записи
+		rowMap := make(map[string]interface{}, kolColumns)
+		for i, colName := range arrNamesColumns {
+			if rawRow[i] == nil {
+				rowMap[colName] = nil // NULL в БД
+			} else {
+				rowMap[colName] = string(rawRow[i]) // безопасно для текста и чисел
+			}
+		}
+
+		records = append(records, rowMap)
 	}
 
-	if e.columnNames == nil {
-		e.columnNames = make(map[string][]string)
+	if err = rows.Err(); err != nil {
+		return nil, err
 	}
-	e.columnNames[tableName] = resultColumns
 
-	return resultColumns, rows.Err()
-}
-
-func (e *DbExplorer) getAllTableData(tableName string) ([][]string, error) {
-	// TODO: дописать чтобы получалось неизвестное кол-во полей таблицы
-	schema, _ := e.currentSchema()
-	/*rows, err :=*/ e.db.Query(`
-		SELECT * FROM ?
-	`, schema, tableName)
-
-	return nil, nil
+	return records, nil
 }
 
 // helper: получить текущую схему(название бд) MySQL
@@ -276,4 +356,73 @@ func (e *DbExplorer) currentSchema() (string, error) {
 
 	e.schemaName = schema
 	return schema, nil
+}
+
+// создаёт новую запись, данный по записи в теле запроса (POST-параметры)
+// POST /$table
+func (e *DbExplorer) createTable(tableName string) (int, error) {
+
+	if !e.IsTableExists(tableName) {
+		return 0, errors.New("unknown table")
+	}
+
+	columnNamesStr := `(`
+	stringsQuestions := `(`
+	for i := 0; i < len(e.columnNames); i++ {
+		columnNamesStr += " " + fmt.Sprintf("%s", e.columnNames[tableName][i])
+		stringsQuestions += ` ?,`
+	}
+	stringsQuestions += ")"
+	columnNamesStr += ")"
+
+	// Создаем строку с плейсхолдерами для значений
+	placeholdersStr := "("
+	for i := 0; i < len(e.columnNames); i++ {
+		if i > 0 {
+			placeholdersStr += ","
+		}
+		placeholdersStr += "?"
+	}
+	placeholdersStr += ")"
+
+	for i := 0; i < len(e.columnNames); i++ {
+
+	}
+
+	// Собираем INSERT запрос через sprintf для имен таблиц/колонок
+	insertQuery := fmt.Sprintf("INSERT INTO `%s` %s VALUES %s", tableName, columnNamesStr, placeholdersStr)
+
+	// TODO: Здесь нужно получить данные из тела запроса и передать их как значения
+	// Пока что создаем пустые значения для демонстрации
+	values := make([]interface{}, len(e.columnNames))
+	for i := range values {
+		values[i] = nil // или дефолтные значения
+	}
+
+	idx, err := e.db.Exec(insertQuery, values...)
+	if err != nil {
+		return 0, err
+	}
+
+	lastId, _ := idx.LastInsertId()
+	fmt.Print(strconv.Itoa(int(lastId)))
+
+	return int(lastId), nil
+}
+
+func (e *DbExplorer) getListOfRecords(limit int, offset int, tableName string) ([]map[string]any, error) {
+	data, err := e.getAllTableData(tableName)
+	if err != nil {
+		return nil, err
+	}
+
+	var result []map[string]any
+	for i, row := range data {
+		if i >= offset && i < offset+limit {
+			result = append(result, row)
+
+		}
+	}
+
+	return result, nil
 }
