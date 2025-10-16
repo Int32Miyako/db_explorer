@@ -308,6 +308,17 @@ func (e *DbExplorer) getAllTableData(tableName string) ([]map[string]any, error)
 		return nil, err
 	}
 
+	// получаем мета-информацию по колонкам, чтобы знать их типы
+	columnsInfo, err := e.getColumnsInfo(tableName)
+	if err != nil {
+		return nil, err
+	}
+	// мапим имя колонки -> тип (как строку из MySQL, например: "int(11)")
+	columnNameToType := make(map[string]string, len(columnsInfo))
+	for _, c := range columnsInfo {
+		columnNameToType[c.ColumnName] = c.ColumnType
+	}
+
 	kolColumns := len(arrNamesColumns)
 
 	// создаём массив для хранения текущей строки
@@ -333,7 +344,20 @@ func (e *DbExplorer) getAllTableData(tableName string) ([]map[string]any, error)
 			if rawRow[i] == nil {
 				rowMap[colName] = nil // NULL в БД
 			} else {
-				rowMap[colName] = string(rawRow[i]) // безопасно для текста и чисел
+				valStr := string(rawRow[i])
+				colType := columnNameToType[colName]
+
+				// если тип колонки целочисленный — конвертируем значение в int
+				if strings.HasPrefix(colType, "int") || strings.HasPrefix(colType, "tinyint") || strings.HasPrefix(colType, "smallint") || strings.HasPrefix(colType, "mediumint") || strings.HasPrefix(colType, "bigint") {
+					if n, err := strconv.ParseInt(valStr, 10, 64); err == nil {
+						rowMap[colName] = int(n)
+					} else {
+						// если по какой-то причине не распарсили — отдадим как строку
+						rowMap[colName] = valStr
+					}
+				} else {
+					rowMap[colName] = valStr // для остальных типов оставляем строку
+				}
 			}
 		}
 
