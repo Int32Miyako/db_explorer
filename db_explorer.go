@@ -93,7 +93,7 @@ func (e *DbExplorer) IsTableExists(tableName string) bool {
 }
 
 func (e *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	var resp map[string]any
+	var req, resp map[string]any
 	// r.URL.Path - Путь (часть после хоста) = "/users/5"
 	path := strings.Trim(r.URL.Path, "/") // на случай если "/users/5/ "
 	parts := strings.Split(path, "/")
@@ -107,7 +107,7 @@ func (e *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch r.Method {
-	case "GET":
+	case http.MethodGet:
 		// 3 функции получится
 		if path == "" {
 			tableNames, err := e.getAllTableNames()
@@ -218,7 +218,7 @@ func (e *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		}
 
-	case "POST":
+	case http.MethodPost:
 
 		body := r.Body
 		defer body.Close()
@@ -228,7 +228,6 @@ func (e *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		var req map[string]any
 		err = json.Unmarshal(bodyBytes, &req)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -252,10 +251,38 @@ func (e *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Write(jsonResponse)
 		// Удобрим эту гору собой, став её углём
 
-	case "PUT":
-		// PUT /$table/$id
+	case http.MethodPut:
+		body := r.Body
+		defer body.Close()
+		bodyBytes, err := io.ReadAll(body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 
-	case "DELETE":
+		err = json.Unmarshal(bodyBytes, &req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		idx, err := e.UpdateRecord(req, tableName, id)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		resp = Response{
+			"response": Response{
+				"updated": idx,
+			},
+		}
+
+		jsonResponse, _ := json.Marshal(resp)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(jsonResponse)
+
+	case http.MethodDelete:
 
 	}
 
@@ -530,4 +557,41 @@ func (e *DbExplorer) CreateRecord(req map[string]any, tableName string) (int, er
 	}
 
 	return int(lastID), nil
+}
+
+func (e *DbExplorer) UpdateRecord(req map[string]any, tableName string, id int) (int, error) {
+	if !e.IsTableExists(tableName) {
+		return -1, errors.New("unknown table")
+	}
+
+	cols := e.columnsInfo[tableName]
+	var sets []string
+	var values []any
+
+	for _, col := range cols {
+		if col.ColumnName == "id" {
+			continue
+		}
+		if v, ok := req[col.ColumnName]; ok {
+			sets = append(sets, fmt.Sprintf("`%s` = ?", col.ColumnName))
+			values = append(values, v)
+		}
+	}
+
+	query := fmt.Sprintf(
+		"UPDATE `%s` SET %s WHERE `id` = ?",
+		tableName,
+		strings.Join(sets, ", "),
+	)
+
+	values = append(values, id)
+	result, err := e.db.Exec(query, values...)
+	if err != nil {
+		return -1, err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return -1, err
+	}
+	return int(rowsAffected), nil
 }
