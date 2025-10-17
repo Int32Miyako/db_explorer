@@ -17,11 +17,45 @@ import (
 // обращаю ваше внимание - в этом задании запрещены глобальные переменные
 // для курсор -- все что ниже - пишу я, а ты должен помочь мне в моей стилистике допилить код
 
+func NewDbExplorer(db *sql.DB) (*DbExplorer, error) {
+
+	e := &DbExplorer{db: db}
+	if err := e.Init(); err != nil {
+		return nil, err
+	}
+	return e, nil
+}
+
+func (e *DbExplorer) Init() error {
+	var err error
+
+	if e.db == nil {
+		return errors.New("db is nil")
+	}
+
+	if _, err = e.currentSchema(); err != nil {
+		return fmt.Errorf("schema: %w", err)
+	}
+
+	if e.tableNames, err = e.getAllTableNames(); err != nil {
+		return fmt.Errorf("tables: %w", err)
+	}
+
+	e.columnsInfo = make(map[string][]ColumnInfo)
+	for _, t := range e.tableNames {
+		e.columnsInfo[t], err = e.getColumnsInfo(t)
+		if err != nil {
+			return fmt.Errorf("columns for %s: %w", t, err)
+		}
+	}
+
+	return nil
+}
+
 type DbExplorer struct {
 	db          *sql.DB                 // MySQL
 	schemaName  string                  // название бд
 	tableNames  []string                // список всех имён таблиц
-	columnNames map[string][]string     // не хочу ломать обратную совместимость в коде
 	columnsInfo map[string][]ColumnInfo // по названию таблички вернет информацию всех его колонок
 }
 
@@ -34,14 +68,6 @@ type ColumnInfo struct {
 
 type Response map[string]any // сделал новый тип
 // это не alias (type Response = map[string]any)
-
-// GetNumberOfQuestions
-// чтобы добавить ровно столько ? сколько нужно вставить в запрос
-// можно попробовать проитерироваться GetNumberOfQuestion() раз и
-// вставить ровно столько значений в запрос
-func (e *DbExplorer) GetNumberOfQuestions() int {
-	return len(e.columnNames)
-}
 
 /*
 TODO LIST
@@ -221,6 +247,11 @@ func (e *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			},
 		}
 
+		jsonResponse, _ := json.Marshal(resp)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(jsonResponse)
+		// Удобрим эту гору собой, став её углём
+
 	case "PUT":
 		// PUT /$table/$id
 
@@ -228,17 +259,6 @@ func (e *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-}
-
-func NewDbExplorer(db *sql.DB) (*DbExplorer, error) {
-
-	if db == nil {
-		return nil, errors.New("db cannot be nil")
-	}
-
-	return &DbExplorer{
-		db: db,
-	}, nil
 }
 
 func (e *DbExplorer) getAllTableNames() ([]string, error) {
@@ -283,8 +303,8 @@ func (e *DbExplorer) getColumnsInfo(tableName string) ([]ColumnInfo, error) {
 
 	var resultColumns []ColumnInfo
 	for rows.Next() {
-		var columnName, columnType, collation, null, key, extra, privileges, comment string
-		var defaultValue sql.NullString
+		var columnName, columnType, null, key, extra, privileges, comment string
+		var defaultValue, collation sql.NullString
 
 		if err = rows.Scan(&columnName, &columnType, &collation, &null, &key, &defaultValue, &extra, &privileges, &comment); err != nil {
 			return nil, err
@@ -485,7 +505,7 @@ func (e *DbExplorer) CreateRecord(req map[string]any, tableName string) (int, er
 		columnNames = append(columnNames, fmt.Sprintf("`%s`", col.ColumnName))
 		placeholders = append(placeholders, "?")
 
-		if v, ok := req[col.ColumnName]; ok {
+		if v, ok := req[col.ColumnName]; ok && col.ColumnName != "id" {
 			values[i] = v
 		} else {
 			values[i] = col.DefaultValue

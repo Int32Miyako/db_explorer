@@ -226,7 +226,7 @@ func TestApis(t *testing.T) {
 				},
 			},
 		},
-		Case{
+		Case{ // тут мы
 			Path:   "/items/3",
 			Method: http.MethodPost,
 			Body: CR{
