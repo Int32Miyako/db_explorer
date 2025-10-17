@@ -94,8 +94,9 @@ func TestApis(t *testing.T) {
 
 	PrepareTestApis(db)
 
-	// возможно вам будет удобно закомментировать это чтобы смотреть результат после теста
-	// defer CleanupTestApis(db)
+	// возможно вам будет удобно закомментировать
+	// это чтобы смотреть результат после теста
+	defer CleanupTestApis(db)
 
 	handler, err := NewDbExplorer(db)
 	if err != nil {
@@ -197,7 +198,7 @@ func TestApis(t *testing.T) {
 		// тут идёт создание и редактирование
 		Case{
 			Path:   "/items/",
-			Method: http.MethodPut,
+			Method: http.MethodPost,
 			Body: CR{
 				"id":          42, // auto increment primary key игнорируется при вставке
 				"title":       "db_crud",

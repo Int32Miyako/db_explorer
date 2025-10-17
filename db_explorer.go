@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -31,7 +32,8 @@ type ColumnInfo struct {
 	DefaultValue sql.NullString
 }
 
-type Response map[string]any
+type Response map[string]any // сделал новый тип
+// это не alias (type Response = map[string]any)
 
 // GetNumberOfQuestions
 // чтобы добавить ровно столько ? сколько нужно вставить в запрос
@@ -65,7 +67,7 @@ func (e *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(path, "/")
 	var tableName string
 	var id int
-	if len(parts) == 1 && parts[0] != "" {
+	if (len(parts) == 1 || len(parts) == 2) && parts[0] != "" {
 		tableName = parts[0]
 	}
 	if len(parts) == 2 && parts[1] != "" {
@@ -151,18 +153,48 @@ func (e *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		//  GET /$table/$id
 		if len(parts) == 2 {
 			// Имя таблицы через sprintf, значение id через плейсхолдер
-			query := fmt.Sprintf("SELECT * FROM `%s` WHERE id=?", tableName)
-			row := e.db.QueryRow(query, id)
+			record, err := e.getRecordById(id, tableName)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			// Формируем структуру для ответа
+			resp := Response{
+				"response": Response{
+					"record": record,
+				},
+			}
 
-			// TODO: Здесь нужно правильно обработать результат
-			row.Scan(&id)
+			if len(record) > 0 {
+				jsonTableNames, _ := json.Marshal(resp)
+				w.Header().Set("Content-Type", "application/json")
+				w.Write(jsonTableNames)
+			} else {
+				http.Error(w, err.Error(), http.StatusNotFound)
+			}
+
 		}
 
 	case "POST":
-		_, err := e.createTable(tableName)
+
+		body := r.Body
+		defer body.Close()
+		bodyBytes, err := io.ReadAll(body)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
+
+		var req map[string]any
+		err = json.Unmarshal(bodyBytes, &req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+
+		_, err = e.CreateRecord(req, tableName)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+
 	case "PUT":
 		// PUT /$table/$id
 
@@ -375,58 +407,6 @@ func (e *DbExplorer) currentSchema() (string, error) {
 	return schema, nil
 }
 
-// создаёт новую запись, данный по записи в теле запроса (POST-параметры)
-// POST /$table
-func (e *DbExplorer) createTable(tableName string) (int, error) {
-
-	if !e.IsTableExists(tableName) {
-		return 0, errors.New("unknown table")
-	}
-
-	columnNamesStr := `(`
-	stringsQuestions := `(`
-	for i := 0; i < len(e.columnNames); i++ {
-		columnNamesStr += " " + fmt.Sprintf("%s", e.columnNames[tableName][i])
-		stringsQuestions += ` ?,`
-	}
-	stringsQuestions += ")"
-	columnNamesStr += ")"
-
-	// Создаем строку с плейсхолдерами для значений
-	placeholdersStr := "("
-	for i := 0; i < len(e.columnNames); i++ {
-		if i > 0 {
-			placeholdersStr += ","
-		}
-		placeholdersStr += "?"
-	}
-	placeholdersStr += ")"
-
-	for i := 0; i < len(e.columnNames); i++ {
-
-	}
-
-	// Собираем INSERT запрос через sprintf для имен таблиц/колонок
-	insertQuery := fmt.Sprintf("INSERT INTO `%s` %s VALUES %s", tableName, columnNamesStr, placeholdersStr)
-
-	// TODO: Здесь нужно получить данные из тела запроса и передать их как значения
-	// Пока что создаем пустые значения для демонстрации
-	values := make([]interface{}, len(e.columnNames))
-	for i := range values {
-		values[i] = nil // или дефолтные значения
-	}
-
-	idx, err := e.db.Exec(insertQuery, values...)
-	if err != nil {
-		return 0, err
-	}
-
-	lastId, _ := idx.LastInsertId()
-	fmt.Print(strconv.Itoa(int(lastId)))
-
-	return int(lastId), nil
-}
-
 func (e *DbExplorer) getListOfRecords(limit int, offset int, tableName string) ([]map[string]any, error) {
 	data, err := e.getAllTableData(tableName)
 	if err != nil {
@@ -442,4 +422,60 @@ func (e *DbExplorer) getListOfRecords(limit int, offset int, tableName string) (
 	}
 
 	return result, nil
+}
+
+// понятно что необходимо как то валидировать что в таблице вообще есть поле id или другой PK
+// но как есть
+func (e *DbExplorer) getRecordById(id int, tableName string) (Response, error) {
+	data, err := e.getAllTableData(tableName)
+	if err != nil {
+		return nil, err
+	}
+
+	// запомнить такую конструкцию if
+	// чтобы сначала проверить что значение есть в мапе а потом уже его достать
+	var result Response
+	for _, row := range data {
+		if val, ok := row["id"]; ok && val == id {
+			result = row
+			break
+		}
+	}
+
+	return result, nil
+}
+
+// CreateRecord создаёт новую запись, данный по записи в теле запроса (POST-параметры)
+func (e *DbExplorer) CreateRecord(req map[string]any, tableName string) (int, error) {
+	// POST /$table
+
+	if !e.IsTableExists(tableName) {
+		return -1, errors.New("unknown table")
+	}
+
+	// собираем запрос из названий колонок и ( ? ? ? ? ) для query значений
+	columnNamesStr := "( "
+	stringsQuestions := "( "
+	for _, val := range e.columnsInfo[tableName] {
+		columnNamesStr += fmt.Sprintf("`%s`", val.ColumnName) + " "
+		stringsQuestions += `?, `
+	}
+	stringsQuestions += ")"
+	columnNamesStr += ")"
+
+	insertQuery := fmt.Sprintf("INSERT INTO `%s` %s VALUES %s", tableName, columnNamesStr, stringsQuestions)
+	values := make([]any, len(e.columnNames))
+	for i := range values {
+		values[i] = e.columnsInfo[tableName][i].DefaultValue // или дефолтные значения
+	}
+
+	idx, err := e.db.Exec(insertQuery, values...)
+	if err != nil {
+		return -1, err
+	}
+
+	lastId, _ := idx.LastInsertId()
+	fmt.Print(strconv.Itoa(int(lastId)))
+
+	return int(lastId), nil
 }
