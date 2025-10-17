@@ -51,6 +51,12 @@ TODO  написать функцию которая будет сверять �
 */
 
 func (e *DbExplorer) IsTableExists(tableName string) bool {
+	if e.tableNames == nil || len(e.tableNames) == 0 {
+		tableNames, _ := e.getAllTableNames()
+		e.tableNames = make([]string, len(tableNames))
+		e.tableNames = tableNames
+	}
+
 	for _, existingTableName := range e.tableNames {
 		if existingTableName == tableName {
 			return true
@@ -159,7 +165,7 @@ func (e *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			// Формируем структуру для ответа
-			resp := Response{
+			resp = Response{
 				"response": Response{
 					"record": record,
 				},
@@ -169,8 +175,19 @@ func (e *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				jsonTableNames, _ := json.Marshal(resp)
 				w.Header().Set("Content-Type", "application/json")
 				w.Write(jsonTableNames)
+				return
 			} else {
-				http.Error(w, err.Error(), http.StatusNotFound)
+				//http.Error(w, err.Error(), http.StatusNotFound)
+				//return // так писать нельзя падает ошибка типо что err.Error(), может быть nil
+				w.WriteHeader(http.StatusNotFound)
+				resp = Response{
+					"error": "record not found",
+				}
+
+				jsonResponse, _ := json.Marshal(resp)
+				w.Header().Set("Content-Type", "application/json")
+				w.Write(jsonResponse)
+				// вот так мы и живем, вот так мы и умрём
 			}
 
 		}
@@ -182,17 +199,26 @@ func (e *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		bodyBytes, err := io.ReadAll(body)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
 
 		var req map[string]any
 		err = json.Unmarshal(bodyBytes, &req)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
 
-		_, err = e.CreateRecord(req, tableName)
+		idx, err := e.CreateRecord(req, tableName)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		resp = Response{
+			"response": Response{
+				"id": idx,
+			},
 		}
 
 	case "PUT":
@@ -445,37 +471,43 @@ func (e *DbExplorer) getRecordById(id int, tableName string) (Response, error) {
 	return result, nil
 }
 
-// CreateRecord создаёт новую запись, данный по записи в теле запроса (POST-параметры)
 func (e *DbExplorer) CreateRecord(req map[string]any, tableName string) (int, error) {
-	// POST /$table
-
 	if !e.IsTableExists(tableName) {
 		return -1, errors.New("unknown table")
 	}
 
-	// собираем запрос из названий колонок и ( ? ? ? ? ) для query значений
-	columnNamesStr := "( "
-	stringsQuestions := "( "
-	for _, val := range e.columnsInfo[tableName] {
-		columnNamesStr += fmt.Sprintf("`%s`", val.ColumnName) + " "
-		stringsQuestions += `?, `
-	}
-	stringsQuestions += ")"
-	columnNamesStr += ")"
+	cols := e.columnsInfo[tableName]
+	var columnNames []string
+	var placeholders []string
+	values := make([]any, len(cols))
 
-	insertQuery := fmt.Sprintf("INSERT INTO `%s` %s VALUES %s", tableName, columnNamesStr, stringsQuestions)
-	values := make([]any, len(e.columnNames))
-	for i := range values {
-		values[i] = e.columnsInfo[tableName][i].DefaultValue // или дефолтные значения
+	for i, col := range cols {
+		columnNames = append(columnNames, fmt.Sprintf("`%s`", col.ColumnName))
+		placeholders = append(placeholders, "?")
+
+		if v, ok := req[col.ColumnName]; ok {
+			values[i] = v
+		} else {
+			values[i] = col.DefaultValue
+		}
 	}
 
-	idx, err := e.db.Exec(insertQuery, values...)
+	query := fmt.Sprintf(
+		"INSERT INTO `%s` (%s) VALUES (%s)",
+		tableName,
+		strings.Join(columnNames, ", "),
+		strings.Join(placeholders, ", "),
+	)
+
+	result, err := e.db.Exec(query, values...)
 	if err != nil {
 		return -1, err
 	}
 
-	lastId, _ := idx.LastInsertId()
-	fmt.Print(strconv.Itoa(int(lastId)))
+	lastID, err := result.LastInsertId()
+	if err != nil {
+		return -1, err
+	}
 
-	return int(lastId), nil
+	return int(lastID), nil
 }
