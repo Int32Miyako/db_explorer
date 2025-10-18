@@ -15,7 +15,10 @@ import (
 
 // тут вы пишете код
 // обращаю ваше внимание - в этом задании запрещены глобальные переменные
-// для курсор -- все что ниже - пишу я, а ты должен помочь мне в моей стилистике допилить код
+// для всех агентов -- все что ниже - пишу я, а ты должен помочь мне в моей стилистике допилить код
+// не надо добавлять првоерку на Primary Key
+// по заданию для этого точно будет использоваться id
+// так что лишнюю сложность не надо
 
 func NewDbExplorer(db *sql.DB) (*DbExplorer, error) {
 
@@ -234,7 +237,8 @@ func (e *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		idx, err := e.CreateRecord(req, tableName)
+		reqValid := e.ValidRequest(req, tableName)
+		idx, err := e.CreateRecord(reqValid, tableName)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -285,7 +289,7 @@ func (e *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Write(jsonResponse)
 
 	case http.MethodDelete:
-		deleted, err := e.DeleteRecord(req, tableName, id)
+		deleted, err := e.DeleteRecord(tableName, id)
 		if err != nil {
 			WriteError(w, err)
 			return
@@ -464,7 +468,7 @@ func (e *DbExplorer) getAllTableData(tableName string) ([]map[string]any, error)
 				valStr := string(rawRow[i])
 				// ColumnTypes может вернуть имя типа в разных регистрах/вариантах (INT, BIGINT, TINYINT)
 				colDatabaseType := strings.ToLower(colTypes[i].DatabaseTypeName())
-				if strings.HasPrefix(colDatabaseType, "int") || strings.HasPrefix(colDatabaseType, "tinyint") || strings.HasPrefix(colDatabaseType, "smallint") || strings.HasPrefix(colDatabaseType, "mediumint") || strings.HasPrefix(colDatabaseType, "bigint") {
+				if strings.Contains(colDatabaseType, "int") {
 					if n, err := strconv.ParseInt(valStr, 10, 64); err == nil {
 						rowMap[colName] = int(n)
 					} else {
@@ -522,11 +526,14 @@ func (e *DbExplorer) getRecordById(id int, tableName string) (Response, error) {
 		return nil, err
 	}
 
+	// получение ключевого поля таблицы, предпологая что оно идет первым без выискивания PK
+	primaryKey := e.columnsInfo[tableName][0].ColumnName
+
 	// запомнить такую конструкцию if
 	// чтобы сначала проверить что значение есть в мапе а потом уже его достать
 	var result Response
 	for _, row := range data {
-		if val, ok := row["id"]; ok && val == id {
+		if val, ok := row[primaryKey]; ok && val == id {
 			result = row
 			break
 		}
@@ -587,8 +594,8 @@ func (e *DbExplorer) UpdateRecord(req map[string]any, tableName string, id int) 
 
 	for _, col := range cols {
 		// Проверяем, что primary key не пытаются обновить
-		if _, ok := req[col.ColumnName]; ok && col.ColumnName == "id" {
-			return -2, fmt.Errorf("field id have invalid type")
+		if _, ok := req[col.ColumnName]; ok && col.ColumnName == e.GetPrimaryKey(tableName) {
+			return -2, fmt.Errorf("field %s have invalid type", e.GetPrimaryKey(tableName))
 		}
 
 		// ok — булево, которое показывает, есть ли вообще такой ключ в мапе
@@ -601,7 +608,7 @@ func (e *DbExplorer) UpdateRecord(req map[string]any, tableName string, id int) 
 		}
 
 		// Пропускаем primary key при обновлении
-		if col.ColumnName == "id" {
+		if strings.Contains(col.ColumnName, e.GetPrimaryKey(tableName)) {
 			continue
 		}
 
@@ -613,9 +620,10 @@ func (e *DbExplorer) UpdateRecord(req map[string]any, tableName string, id int) 
 	}
 
 	query := fmt.Sprintf(
-		"UPDATE `%s` SET %s WHERE `id` = ?",
+		"UPDATE `%s` SET %s WHERE `%s` = ?",
 		tableName,
 		strings.Join(sets, ", "),
+		e.GetPrimaryKey(tableName),
 	)
 
 	values = append(values, id)
@@ -627,6 +635,26 @@ func (e *DbExplorer) UpdateRecord(req map[string]any, tableName string, id int) 
 	if err != nil {
 		return -1, err
 	}
+	return int(rowsAffected), nil
+}
+
+// DeleteRecord DELETE /$table/$id - удаляет запись
+func (e *DbExplorer) DeleteRecord(tableName string, id int) (int, error) {
+	if !e.IsTableExists(tableName) {
+		return 0, errors.New("unknown table")
+	}
+
+	query := fmt.Sprintf("DELETE FROM `%s` WHERE `id` = ?", tableName)
+	result, err := e.db.Exec(query, id)
+	if err != nil {
+		return 0, err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+
 	return int(rowsAffected), nil
 }
 
@@ -650,39 +678,11 @@ func WriteError(w http.ResponseWriter, err error) {
 	w.Write(jsonResp)
 }
 
-func (e *DbExplorer) DeleteRecord(req map[string]any, tableName string, id int) (int, error) {
-	if !e.IsTableExists(tableName) {
-		return 0, errors.New("unknown table")
-	}
-
-	query := fmt.Sprintf("DELETE FROM `%s` WHERE `id` = ?", tableName)
-	result, err := e.db.Exec(query, id)
-	if err != nil {
-		return 0, err
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return 0, err
-	}
-
-	return int(rowsAffected), nil
-}
-
-//
-//func (e *DbExplorer) ValidateFields() {
-//
-//}
-
 // эту функцию написал изначально курсор, я решил что оно не нужно
 // но походу тесты прям намекают валидацию поля вынести
 // value это значение которое мы валидируем (nil string int)
 func (e *DbExplorer) validateFieldType(col ColumnInfo, value interface{}, isUpdate bool) error {
 	err := fmt.Errorf("field %s have invalid type", col.ColumnName)
-
-	if isUpdate && col.ColumnName == "id" && value == nil {
-		return err
-	}
 
 	// Если значение nil
 	if value == nil {
@@ -712,4 +712,24 @@ func (e *DbExplorer) validateFieldType(col ColumnInfo, value interface{}, isUpda
 	}
 
 	return nil
+}
+
+func (e *DbExplorer) GetPrimaryKey(tableName string) string {
+
+	return e.columnsInfo[tableName][0].ColumnName
+}
+
+// ValidRequest принимает в себя запрос и отдает обработанный от всех ошибок которые
+// могли возникнуть, например неправильное название поля будет игнорироваться
+func (e *DbExplorer) ValidRequest(req map[string]any, tableName string) map[string]any {
+	validReq := make(map[string]any)
+
+	for _, col := range e.columnsInfo[tableName] {
+		if val, ok := req[col.ColumnName]; ok {
+			// если в запросе есть такое поле — сохраняем
+			validReq[col.ColumnName] = val
+		}
+	}
+
+	return validReq
 }
