@@ -318,7 +318,7 @@ func TestApis(t *testing.T) {
 				"error": "field id have invalid type",
 			},
 		},
-		Case{
+		Case{ // <- теперь тута TODO
 			Path:   "/items/3",
 			Method: http.MethodPut,
 			Status: http.StatusBadRequest,
