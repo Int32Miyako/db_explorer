@@ -111,24 +111,9 @@ func (e *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		// 3 функции получится
+		// GET /
 		if path == "" {
-			tableNames, err := e.getAllTableNames()
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-			}
-
-			// Формируем структуру для ответа
-			resp = Response{
-				"response": Response{
-					"tables": tableNames,
-				},
-			}
-			jsonTableNames, _ := json.Marshal(resp)
-			w.Header().Set("Content-Type", "application/json")
-			w.Write(jsonTableNames)
-
-			return
+			GetTables(e, w)
 		}
 
 		// GET /$table?limit=5&offset=7
@@ -227,20 +212,20 @@ func (e *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer body.Close()
 		bodyBytes, err := io.ReadAll(body)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			WriteError(w, err)
 			return
 		}
 
 		err = json.Unmarshal(bodyBytes, &req)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			WriteError(w, err)
 			return
 		}
 
 		reqValid := e.ValidRequest(req, tableName)
 		idx, err := e.CreateRecord(reqValid, tableName)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			WriteError(w, err)
 			return
 		}
 
@@ -262,13 +247,13 @@ func (e *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer body.Close()
 		bodyBytes, err := io.ReadAll(body)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			WriteError(w, err)
 			return
 		}
 
 		err = json.Unmarshal(bodyBytes, &req)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			WriteError(w, err)
 			return
 		}
 
@@ -377,47 +362,6 @@ func (e *DbExplorer) getColumnsInfo(tableName string) ([]ColumnInfo, error) {
 
 	return resultColumns, err
 }
-
-/*
-// что то что писал я
-func (e *DbExplorer) getAllTableData(tableName string) ([][]string, error) {
-	// Имя таблицы через sprintf, НЕ через плейсхолдер
-	query := fmt.Sprintf("SELECT * FROM `%s`", tableName)
-	rows, err := e.db.Query(query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	columnsInfo, err := e.getColumnsInfo(tableName)
-	// имея всю инфу что можно сделать?
-	// можно пробежаться по инфе колонок
-	// но нужно и достать данные
-	// для того чтобы достать данные надо получить неизвестное количество переменных
-	// известное кол-во переменных и равное длине массива columnsInfo
-	// лист наллПтров как предлагал гпт
-
-	// https://qna.habr.com/q/983721
-	// короче вот решение, сам я придумать ничего не могу
-	// ниже то самое решение
-
-	// создаем массив названий столбцов таблицы
-	arrNamesColumns, _ := rows.Columns()
-
-	// получаем количество столбцов
-	kolColumns := len(arrNamesColumns)
-	// создаем отображения которое по ключу (названию столбца) будет хранить срез всех записей данного столбца
-	resMap := make(map[string][]interface{}, kolColumns)
-
-	listOfInterfaces := make([]interface{}, len(columnsInfo))
-
-	for rows.Next() {
-		rows.Scan(listOfInterfaces...)
-	}
-
-	return nil, nil
-}
-*/
 
 // []map[string]any это массив всех записей таблицы
 func (e *DbExplorer) getAllTableData(tableName string) ([]map[string]any, error) {
@@ -750,4 +694,44 @@ func (e *DbExplorer) ValidRequest(req map[string]any, tableName string) map[stri
 	}
 
 	return validReq
+}
+
+func GetTables(e *DbExplorer, w http.ResponseWriter) {
+	tableNames, err := e.getAllTableNames()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+
+	// Формируем структуру для ответа
+	resp := Response{
+		"response": Response{
+			"tables": tableNames,
+		},
+	}
+	jsonTableNames, _ := json.Marshal(resp)
+	w.Header().Set("Content-Type", "application/json")
+	_, err = w.Write(jsonTableNames)
+	if err != nil {
+		return
+	}
+}
+
+func GetRecords() {
+
+}
+
+func GetRecordById() {
+
+}
+
+func CreateRecord() {
+
+}
+
+func UpdateRecord() {
+
+}
+
+func DeleteRecords() {
+
 }
