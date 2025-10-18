@@ -77,7 +77,7 @@ TODO  написать функцию которая будет сверять �
 */
 
 func (e *DbExplorer) IsTableExists(tableName string) bool {
-	if e.tableNames == nil || len(e.tableNames) == 0 {
+	if len(e.tableNames) == 0 {
 		tableNames, _ := e.getAllTableNames()
 		e.tableNames = make([]string, len(tableNames))
 		e.tableNames = tableNames
@@ -249,6 +249,7 @@ func (e *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		jsonResponse, _ := json.Marshal(resp)
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(jsonResponse)
+
 		// Удобрим эту гору собой, став её углём
 
 	case http.MethodPut:
@@ -284,6 +285,21 @@ func (e *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Write(jsonResponse)
 
 	case http.MethodDelete:
+		deleted, err := e.DeleteRecord(req, tableName, id)
+		if err != nil {
+			WriteError(w, err)
+			return
+		}
+
+		resp = Response{
+			"response": Response{
+				"deleted": deleted,
+			},
+		}
+
+		jsonResponse, _ := json.Marshal(resp)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(jsonResponse)
 
 	}
 
@@ -575,8 +591,13 @@ func (e *DbExplorer) UpdateRecord(req map[string]any, tableName string, id int) 
 			return -2, fmt.Errorf("field id have invalid type")
 		}
 
-		if val, ok := req[col.ColumnName]; ok && col.ColumnName == "title" && val == nil {
-			return -2, fmt.Errorf("field title have invalid type")
+		// ok — булево, которое показывает, есть ли вообще такой ключ в мапе
+		if _, ok := req[col.ColumnName]; ok {
+			err := e.validateFieldType(col, req[col.ColumnName], true)
+			if err != nil {
+				return -2, err
+			}
+
 		}
 
 		// Пропускаем primary key при обновлении
@@ -617,9 +638,8 @@ func WriteError(w http.ResponseWriter, err error) {
 	code := http.StatusInternalServerError
 	msg := err.Error()
 
-	if strings.Contains(msg, "field id have invalid type") ||
-		strings.Contains(msg, "field title have invalid type") ||
-		strings.Contains(msg, "field updated have invalid type") {
+	// Все ошибки вида "field X have invalid type" должны возвращать 400
+	if strings.Contains(msg, "field ") && strings.Contains(msg, " have invalid type") {
 		code = http.StatusBadRequest
 	}
 
@@ -631,8 +651,22 @@ func WriteError(w http.ResponseWriter, err error) {
 }
 
 func (e *DbExplorer) DeleteRecord(req map[string]any, tableName string, id int) (int, error) {
+	if !e.IsTableExists(tableName) {
+		return 0, errors.New("unknown table")
+	}
 
-	return 0, nil
+	query := fmt.Sprintf("DELETE FROM `%s` WHERE `id` = ?", tableName)
+	result, err := e.db.Exec(query, id)
+	if err != nil {
+		return 0, err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+
+	return int(rowsAffected), nil
 }
 
 //
@@ -643,9 +677,38 @@ func (e *DbExplorer) DeleteRecord(req map[string]any, tableName string, id int) 
 // эту функцию написал изначально курсор, я решил что оно не нужно
 // но походу тесты прям намекают валидацию поля вынести
 // value это значение которое мы валидируем (nil string int)
-func (e *DbExplorer) validateFieldType(col ColumnInfo, value interface{}) error {
-	if !col.IsNullable && value == nil {
-		return fmt.Errorf("field %s have invalid type", col.ColumnName)
+func (e *DbExplorer) validateFieldType(col ColumnInfo, value interface{}, isUpdate bool) error {
+	err := fmt.Errorf("field %s have invalid type", col.ColumnName)
+
+	if isUpdate && col.ColumnName == "id" && value == nil {
+		return err
+	}
+
+	// Если значение nil
+	if value == nil {
+		// Для nullable полей nil - это валидное значение
+		if col.IsNullable {
+			return nil
+		}
+		// Для NOT NULL полей nil - это ошибка
+		return err
+	}
+
+	// Проверяем тип значения
+	switch {
+	case strings.HasPrefix(col.ColumnType, "int"):
+		if _, ok := value.(int); !ok {
+			// В JSON числа могут приходить как float64
+			if _, ok := value.(float64); !ok {
+				return err
+			}
+		}
+
+	case strings.Contains(col.ColumnType, "varchar") || strings.Contains(col.ColumnType, "text"):
+		if _, ok := value.(string); !ok {
+			return err
+		}
+
 	}
 
 	return nil
