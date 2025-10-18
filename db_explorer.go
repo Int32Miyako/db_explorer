@@ -244,9 +244,10 @@ func (e *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		primaryKey := e.GetPrimaryKey(tableName)
 		resp = Response{
 			"response": Response{
-				"id": idx,
+				primaryKey: idx,
 			},
 		}
 
@@ -556,10 +557,27 @@ func (e *DbExplorer) CreateRecord(req map[string]any, tableName string) (int, er
 		columnNames = append(columnNames, fmt.Sprintf("`%s`", col.ColumnName))
 		placeholders = append(placeholders, "?")
 
-		if v, ok := req[col.ColumnName]; ok && col.ColumnName != "id" {
+		if v, ok := req[col.ColumnName]; ok && col.ColumnName != e.GetPrimaryKey(tableName) {
 			values[i] = v
 		} else {
-			values[i] = col.DefaultValue
+			// Используем дефолтное значение
+			if col.DefaultValue.Valid {
+				values[i] = col.DefaultValue.String
+			} else {
+				// Если дефолтного значения нет
+				if col.IsNullable {
+					values[i] = nil
+				} else {
+					// Для NOT NULL полей используем пустое значение по типу
+					if strings.Contains(col.ColumnType, "varchar") || strings.Contains(col.ColumnType, "text") {
+						values[i] = ""
+					} else if strings.HasPrefix(col.ColumnType, "int") {
+						values[i] = 0
+					} else {
+						values[i] = nil
+					}
+				}
+			}
 		}
 	}
 
