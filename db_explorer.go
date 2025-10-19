@@ -67,8 +67,8 @@ type Response map[string]any // сделал новый тип
 
 const (
 	StatusInternalServerError = -1
-	badRequestError           = -2
-	dbError                   = -3
+	//badRequestError           = -2
+	//dbError                   = -3
 )
 
 func (e *DbExplorer) IsTableExists(tableName string) bool {
@@ -92,7 +92,8 @@ func (e *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var id int
 
 	// r.URL.Path - Путь (часть после хоста) = "/users/5"
-	path := strings.Trim(r.URL.Path, "/") // на случай если "/users/5/ "
+	// Trim на случай если "/users/5/ "
+	path := strings.Trim(r.URL.Path, "/")
 	parts := strings.Split(path, "/")
 
 	if (len(parts) == 1 || len(parts) == 2) && parts[0] != "" {
@@ -116,7 +117,7 @@ func (e *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		//  GET /$table/$id
 		if len(parts) == 2 && tableName != "" && id > 0 {
-			GetRecordById(e, w, r, tableName, id)
+			GetRecord(e, w, tableName, id)
 		}
 
 	case http.MethodPost:
@@ -137,7 +138,12 @@ func (e *DbExplorer) getAllTableNames() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func(rows *sql.Rows) {
+		err = rows.Close()
+		if err != nil {
+
+		}
+	}(rows)
 
 	var resultTables []string
 	for rows.Next() {
@@ -169,7 +175,12 @@ func (e *DbExplorer) getColumnsInfo(tableName string) ([]ColumnInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func(rows *sql.Rows) {
+		err := rows.Close()
+		if err != nil {
+
+		}
+	}(rows)
 
 	var resultColumns []ColumnInfo
 	for rows.Next() {
@@ -207,7 +218,12 @@ func (e *DbExplorer) getAllTableData(tableName string) ([]map[string]any, error)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func(rows *sql.Rows) {
+		err = rows.Close()
+		if err != nil {
+
+		}
+	}(rows)
 
 	// получаем названия колонок
 	arrNamesColumns, err := rows.Columns()
@@ -231,7 +247,7 @@ func (e *DbExplorer) getAllTableData(tableName string) ([]map[string]any, error)
 		scanArgs[i] = &rawRow[i] // прокидываем указатели в Scan
 	}
 
-	var records []map[string]interface{}
+	var records []map[string]any
 
 	// перебираем все строки таблицы
 	for rows.Next() {
@@ -241,7 +257,7 @@ func (e *DbExplorer) getAllTableData(tableName string) ([]map[string]any, error)
 		}
 
 		// создаём map для одной записи
-		rowMap := make(map[string]interface{}, kolColumns)
+		rowMap := make(map[string]any, kolColumns)
 		for i, colName := range arrNamesColumns {
 			if rawRow[i] == nil {
 				rowMap[colName] = nil // NULL в БД
@@ -292,16 +308,13 @@ func (e *DbExplorer) getListOfRecords(limit int, offset int, tableName string) (
 	for i, row := range data {
 		if i >= offset && i < offset+limit {
 			result = append(result, row)
-
 		}
 	}
 
 	return result, nil
 }
 
-// понятно что необходимо как то валидировать что в таблице вообще есть поле id или другой PK
-// но как есть
-func (e *DbExplorer) getRecordById(id int, tableName string) (Response, error) {
+func (e *DbExplorer) GetRecordById(id int, tableName string) (Response, error) {
 	data, err := e.getAllTableData(tableName)
 	if err != nil {
 		return nil, err
@@ -337,7 +350,7 @@ func (e *DbExplorer) CreateRecord(req map[string]any, tableName string) (int, er
 		columnNames = append(columnNames, fmt.Sprintf("`%s`", col.ColumnName))
 		placeholders = append(placeholders, "?")
 
-		if v, ok := req[col.ColumnName]; ok && col.ColumnName != e.GetPrimaryKey(tableName) {
+		if v, ok := req[col.ColumnName]; ok && col.ColumnName != e.getPrimaryKey(tableName) {
 			values[i] = v
 		} else {
 			// Используем дефолтное значение
@@ -392,13 +405,13 @@ func (e *DbExplorer) UpdateRecord(req map[string]any, tableName string, id int) 
 
 	for _, col := range cols {
 		// Проверяем, что primary key не пытаются обновить
-		if _, ok := req[col.ColumnName]; ok && col.ColumnName == e.GetPrimaryKey(tableName) {
-			return StatusInternalServerError, fmt.Errorf("field %s have invalid type", e.GetPrimaryKey(tableName))
+		if _, ok := req[col.ColumnName]; ok && col.ColumnName == e.getPrimaryKey(tableName) {
+			return StatusInternalServerError, fmt.Errorf("field %s have invalid type", e.getPrimaryKey(tableName))
 		}
 
 		// ok — булево, которое показывает, есть ли вообще такой ключ в мапе
 		if _, ok := req[col.ColumnName]; ok {
-			err := e.validateFieldType(col, req[col.ColumnName], true)
+			err := validateFieldType(col, req[col.ColumnName])
 			if err != nil {
 				return StatusInternalServerError, err
 			}
@@ -406,7 +419,7 @@ func (e *DbExplorer) UpdateRecord(req map[string]any, tableName string, id int) 
 		}
 
 		// Пропускаем primary key при обновлении
-		if strings.Contains(col.ColumnName, e.GetPrimaryKey(tableName)) {
+		if strings.Contains(col.ColumnName, e.getPrimaryKey(tableName)) {
 			continue
 		}
 
@@ -421,7 +434,7 @@ func (e *DbExplorer) UpdateRecord(req map[string]any, tableName string, id int) 
 		"UPDATE `%s` SET %s WHERE `%s` = ?",
 		tableName,
 		strings.Join(sets, ", "),
-		e.GetPrimaryKey(tableName),
+		e.getPrimaryKey(tableName),
 	)
 
 	values = append(values, id)
@@ -478,12 +491,10 @@ func WriteError(w http.ResponseWriter, err error) {
 // эту функцию написал изначально курсор, я решил что оно не нужно
 // но походу тесты прям намекают валидацию поля вынести
 // value это значение которое мы валидируем (nil string int)
-func (e *DbExplorer) validateFieldType(col ColumnInfo, value interface{}, isUpdate bool) error {
+func validateFieldType(col ColumnInfo, value interface{}) error {
 	err := fmt.Errorf("field %s have invalid type", col.ColumnName)
 
-	// Если значение nil
 	if value == nil {
-		// Для nullable полей nil - это валидное значение
 		if col.IsNullable {
 			return nil
 		}
@@ -511,8 +522,7 @@ func (e *DbExplorer) validateFieldType(col ColumnInfo, value interface{}, isUpda
 	return nil
 }
 
-func (e *DbExplorer) GetPrimaryKey(tableName string) string {
-
+func (e *DbExplorer) getPrimaryKey(tableName string) string {
 	return e.columnsInfo[tableName][0].ColumnName
 }
 
@@ -599,14 +609,14 @@ func GetRecords(e *DbExplorer, w http.ResponseWriter, r *http.Request, tableName
 
 }
 
-func GetRecordById(e *DbExplorer, w http.ResponseWriter, r *http.Request, tableName string, id int) {
+func GetRecord(e *DbExplorer, w http.ResponseWriter, tableName string, id int) {
 	// Имя таблицы через sprintf, значение id через плейсхолдер
-	record, err := e.getRecordById(id, tableName)
+	record, err := e.GetRecordById(id, tableName)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// Формируем структуру для ответа
+
 	resp := Response{
 		"response": Response{
 			"record": record,
@@ -622,7 +632,6 @@ func GetRecordById(e *DbExplorer, w http.ResponseWriter, r *http.Request, tableN
 		}
 
 		writeJsonResponse(w, resp)
-		// вот так мы и живем, вот так мы и умрём
 	}
 
 }
@@ -631,7 +640,12 @@ func CreateRecord(e *DbExplorer, w http.ResponseWriter, r *http.Request, tableNa
 	var req map[string]any
 
 	body := r.Body
-	defer body.Close()
+	defer func(body io.ReadCloser) {
+		err := body.Close()
+		if err != nil {
+
+		}
+	}(body)
 	bodyBytes, err := io.ReadAll(body)
 	if err != nil {
 		WriteError(w, err)
@@ -651,7 +665,7 @@ func CreateRecord(e *DbExplorer, w http.ResponseWriter, r *http.Request, tableNa
 		return
 	}
 
-	primaryKey := e.GetPrimaryKey(tableName)
+	primaryKey := e.getPrimaryKey(tableName)
 	resp := Response{
 		"response": Response{
 			primaryKey: idx,
@@ -659,16 +673,18 @@ func CreateRecord(e *DbExplorer, w http.ResponseWriter, r *http.Request, tableNa
 	}
 
 	writeJsonResponse(w, resp)
-
-	// Удобрим эту гору собой, став её углём
-
 }
 
 func UpdateRecord(e *DbExplorer, w http.ResponseWriter, r *http.Request, tableName string, id int) {
 	var req map[string]any
 
 	body := r.Body
-	defer body.Close()
+	defer func(body io.ReadCloser) {
+		err := body.Close()
+		if err != nil {
+
+		}
+	}(body)
 	bodyBytes, err := io.ReadAll(body)
 	if err != nil {
 		WriteError(w, err)
@@ -712,7 +728,6 @@ func DeleteRecords(e *DbExplorer, w http.ResponseWriter, tableName string, id in
 	}
 
 	writeJsonResponse(w, resp)
-
 }
 
 func writeJsonResponse(w http.ResponseWriter, resp Response) {
