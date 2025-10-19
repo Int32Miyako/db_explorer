@@ -13,13 +13,6 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 )
 
-// тут вы пишете код
-// обращаю ваше внимание - в этом задании запрещены глобальные переменные
-// для всех агентов -- все что ниже - пишу я, а ты должен помочь мне в моей стилистике допилить код
-// не надо добавлять првоерку на Primary Key
-// по заданию для этого точно будет использоваться id
-// так что лишнюю сложность не надо
-
 func NewDbExplorer(db *sql.DB) (*DbExplorer, error) {
 
 	e := &DbExplorer{db: db}
@@ -72,12 +65,11 @@ type ColumnInfo struct {
 type Response map[string]any // сделал новый тип
 // это не alias (type Response = map[string]any)
 
-/*
-TODO LIST
-TODO: написать бд которая бы работала с любыми динамическими данными
-TODO  проинициализировать мапу в explorer может быть и в ините но хз где лучше
-TODO  написать функцию которая будет сверять что таблица которую использовал пользователь в запросе вообще существует
-*/
+const (
+	StatusInternalServerError = -1
+	badRequestError           = -2
+	dbError                   = -3
+)
 
 func (e *DbExplorer) IsTableExists(tableName string) bool {
 	if len(e.tableNames) == 0 {
@@ -96,12 +88,13 @@ func (e *DbExplorer) IsTableExists(tableName string) bool {
 }
 
 func (e *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	var req, resp map[string]any
+	var tableName string
+	var id int
+
 	// r.URL.Path - Путь (часть после хоста) = "/users/5"
 	path := strings.Trim(r.URL.Path, "/") // на случай если "/users/5/ "
 	parts := strings.Split(path, "/")
-	var tableName string
-	var id int
+
 	if (len(parts) == 1 || len(parts) == 2) && parts[0] != "" {
 		tableName = parts[0]
 	}
@@ -112,185 +105,28 @@ func (e *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		// GET /
-		if path == "" {
+		if r.URL.Path == "/" {
 			GetTables(e, w)
 		}
 
 		// GET /$table?limit=5&offset=7
-		if len(parts) == 1 {
-
-			if !e.IsTableExists(tableName) {
-				w.WriteHeader(http.StatusNotFound)
-				resp = Response{
-					"error": "unknown table",
-				}
-
-				jsonResponse, _ := json.Marshal(resp)
-				w.Header().Set("Content-Type", "application/json")
-				w.Write(jsonResponse)
-
-				return
-			}
-
-			params := r.URL.Query()
-
-			limit := 5
-			offset := 0
-
-			// с гпт дописал
-			if v := params.Get("limit"); v != "" {
-				var err error
-				limit, err = strconv.Atoi(v)
-				if err != nil || limit < 0 {
-					limit = 5
-				}
-			}
-
-			if v := params.Get("offset"); v != "" {
-				var err error
-				offset, err = strconv.Atoi(v)
-				if err != nil || offset < 0 {
-					offset = 0
-				}
-			}
-
-			listOfRecords, err := e.getListOfRecords(limit, offset, tableName)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-			}
-
-			// Формируем структуру для ответа
-			resp := Response{
-				"response": Response{
-					"records": listOfRecords,
-				},
-			}
-			jsonTableNames, _ := json.Marshal(resp)
-			w.Header().Set("Content-Type", "application/json")
-			w.Write(jsonTableNames)
+		if len(parts) == 1 && tableName != "" {
+			GetRecords(e, w, r, tableName)
 		}
 
 		//  GET /$table/$id
-		if len(parts) == 2 {
-			// Имя таблицы через sprintf, значение id через плейсхолдер
-			record, err := e.getRecordById(id, tableName)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			// Формируем структуру для ответа
-			resp = Response{
-				"response": Response{
-					"record": record,
-				},
-			}
-
-			if len(record) > 0 {
-				jsonTableNames, _ := json.Marshal(resp)
-				w.Header().Set("Content-Type", "application/json")
-				w.Write(jsonTableNames)
-				return
-			} else {
-				//http.Error(w, err.Error(), http.StatusNotFound)
-				//return // так писать нельзя падает ошибка типо что err.Error(), может быть nil
-				w.WriteHeader(http.StatusNotFound)
-				resp = Response{
-					"error": "record not found",
-				}
-
-				jsonResponse, _ := json.Marshal(resp)
-				w.Header().Set("Content-Type", "application/json")
-				w.Write(jsonResponse)
-				// вот так мы и живем, вот так мы и умрём
-			}
-
+		if len(parts) == 2 && tableName != "" && id > 0 {
+			GetRecordById(e, w, r, tableName, id)
 		}
 
 	case http.MethodPost:
-
-		body := r.Body
-		defer body.Close()
-		bodyBytes, err := io.ReadAll(body)
-		if err != nil {
-			WriteError(w, err)
-			return
-		}
-
-		err = json.Unmarshal(bodyBytes, &req)
-		if err != nil {
-			WriteError(w, err)
-			return
-		}
-
-		reqValid := e.ValidRequest(req, tableName)
-		idx, err := e.CreateRecord(reqValid, tableName)
-		if err != nil {
-			WriteError(w, err)
-			return
-		}
-
-		primaryKey := e.GetPrimaryKey(tableName)
-		resp = Response{
-			"response": Response{
-				primaryKey: idx,
-			},
-		}
-
-		jsonResponse, _ := json.Marshal(resp)
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(jsonResponse)
-
-		// Удобрим эту гору собой, став её углём
+		CreateRecord(e, w, r, tableName) // POST /$table
 
 	case http.MethodPut:
-		body := r.Body
-		defer body.Close()
-		bodyBytes, err := io.ReadAll(body)
-		if err != nil {
-			WriteError(w, err)
-			return
-		}
-
-		err = json.Unmarshal(bodyBytes, &req)
-		if err != nil {
-			WriteError(w, err)
-			return
-		}
-
-		idx, err := e.UpdateRecord(req, tableName, id)
-
-		if err != nil {
-			WriteError(w, err)
-			return
-		}
-
-		resp = Response{
-			"response": Response{
-				"updated": idx,
-			},
-		}
-
-		jsonResponse, _ := json.Marshal(resp)
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(jsonResponse)
+		UpdateRecord(e, w, r, tableName, id) // PUT /$table/$id
 
 	case http.MethodDelete:
-		deleted, err := e.DeleteRecord(tableName, id)
-		if err != nil {
-			WriteError(w, err)
-			return
-		}
-
-		resp = Response{
-			"response": Response{
-				"deleted": deleted,
-			},
-		}
-
-		jsonResponse, _ := json.Marshal(resp)
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(jsonResponse)
-
+		DeleteRecords(e, w, tableName, id) // DELETE /$table/$id
 	}
 
 }
@@ -306,7 +142,7 @@ func (e *DbExplorer) getAllTableNames() ([]string, error) {
 	var resultTables []string
 	for rows.Next() {
 		var tableName string
-		if err := rows.Scan(&tableName); err != nil {
+		if err = rows.Scan(&tableName); err != nil {
 			return nil, err
 		}
 		resultTables = append(resultTables, tableName)
@@ -489,7 +325,7 @@ func (e *DbExplorer) getRecordById(id int, tableName string) (Response, error) {
 
 func (e *DbExplorer) CreateRecord(req map[string]any, tableName string) (int, error) {
 	if !e.IsTableExists(tableName) {
-		return -1, errors.New("unknown table")
+		return StatusInternalServerError, errors.New("unknown table")
 	}
 
 	cols := e.columnsInfo[tableName]
@@ -534,12 +370,12 @@ func (e *DbExplorer) CreateRecord(req map[string]any, tableName string) (int, er
 
 	result, err := e.db.Exec(query, values...)
 	if err != nil {
-		return -1, err
+		return StatusInternalServerError, err
 	}
 
 	lastID, err := result.LastInsertId()
 	if err != nil {
-		return -1, err
+		return StatusInternalServerError, err
 	}
 
 	return int(lastID), nil
@@ -547,7 +383,7 @@ func (e *DbExplorer) CreateRecord(req map[string]any, tableName string) (int, er
 
 func (e *DbExplorer) UpdateRecord(req map[string]any, tableName string, id int) (int, error) {
 	if !e.IsTableExists(tableName) {
-		return -1, errors.New("unknown table")
+		return StatusInternalServerError, errors.New("unknown table")
 	}
 
 	cols := e.columnsInfo[tableName]
@@ -557,14 +393,14 @@ func (e *DbExplorer) UpdateRecord(req map[string]any, tableName string, id int) 
 	for _, col := range cols {
 		// Проверяем, что primary key не пытаются обновить
 		if _, ok := req[col.ColumnName]; ok && col.ColumnName == e.GetPrimaryKey(tableName) {
-			return -2, fmt.Errorf("field %s have invalid type", e.GetPrimaryKey(tableName))
+			return StatusInternalServerError, fmt.Errorf("field %s have invalid type", e.GetPrimaryKey(tableName))
 		}
 
 		// ok — булево, которое показывает, есть ли вообще такой ключ в мапе
 		if _, ok := req[col.ColumnName]; ok {
 			err := e.validateFieldType(col, req[col.ColumnName], true)
 			if err != nil {
-				return -2, err
+				return StatusInternalServerError, err
 			}
 
 		}
@@ -591,11 +427,11 @@ func (e *DbExplorer) UpdateRecord(req map[string]any, tableName string, id int) 
 	values = append(values, id)
 	result, err := e.db.Exec(query, values...)
 	if err != nil {
-		return -1, err
+		return StatusInternalServerError, err
 	}
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
-		return -1, err
+		return StatusInternalServerError, err
 	}
 	return int(rowsAffected), nil
 }
@@ -635,9 +471,8 @@ func WriteError(w http.ResponseWriter, err error) {
 
 	w.WriteHeader(code)
 	resp := Response{"error": msg}
-	jsonResp, _ := json.Marshal(resp)
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(jsonResp)
+
+	writeJsonResponse(w, resp)
 }
 
 // эту функцию написал изначально курсор, я решил что оно не нужно
@@ -661,7 +496,7 @@ func (e *DbExplorer) validateFieldType(col ColumnInfo, value interface{}, isUpda
 	case strings.HasPrefix(col.ColumnType, "int"):
 		if _, ok := value.(int); !ok {
 			// В JSON числа могут приходить как float64
-			if _, ok := value.(float64); !ok {
+			if _, ok = value.(float64); !ok {
 				return err
 			}
 		}
@@ -702,7 +537,6 @@ func GetTables(e *DbExplorer, w http.ResponseWriter) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 
-	// Формируем структуру для ответа
 	resp := Response{
 		"response": Response{
 			"tables": tableNames,
@@ -716,22 +550,176 @@ func GetTables(e *DbExplorer, w http.ResponseWriter) {
 	}
 }
 
-func GetRecords() {
+func GetRecords(e *DbExplorer, w http.ResponseWriter, r *http.Request, tableName string) {
+
+	if !e.IsTableExists(tableName) {
+		w.WriteHeader(http.StatusNotFound)
+		resp := Response{
+			"error": "unknown table",
+		}
+
+		writeJsonResponse(w, resp)
+
+		return
+	}
+
+	params := r.URL.Query()
+
+	limit := 5
+	offset := 0
+
+	if v := params.Get("limit"); v != "" {
+		var err error
+		limit, err = strconv.Atoi(v)
+		if err != nil || limit < 0 {
+			limit = 5
+		}
+	}
+
+	if v := params.Get("offset"); v != "" {
+		var err error
+		offset, err = strconv.Atoi(v)
+		if err != nil || offset < 0 {
+			offset = 0
+		}
+	}
+
+	listOfRecords, err := e.getListOfRecords(limit, offset, tableName)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+
+	// Формируем структуру для ответа
+	resp := Response{
+		"response": Response{
+			"records": listOfRecords,
+		},
+	}
+	writeJsonResponse(w, resp)
 
 }
 
-func GetRecordById() {
+func GetRecordById(e *DbExplorer, w http.ResponseWriter, r *http.Request, tableName string, id int) {
+	// Имя таблицы через sprintf, значение id через плейсхолдер
+	record, err := e.getRecordById(id, tableName)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Формируем структуру для ответа
+	resp := Response{
+		"response": Response{
+			"record": record,
+		},
+	}
+
+	if len(record) > 0 {
+		writeJsonResponse(w, resp)
+	} else {
+		w.WriteHeader(http.StatusNotFound)
+		resp = Response{
+			"error": "record not found",
+		}
+
+		writeJsonResponse(w, resp)
+		// вот так мы и живем, вот так мы и умрём
+	}
 
 }
 
-func CreateRecord() {
+func CreateRecord(e *DbExplorer, w http.ResponseWriter, r *http.Request, tableName string) {
+	var req map[string]any
+
+	body := r.Body
+	defer body.Close()
+	bodyBytes, err := io.ReadAll(body)
+	if err != nil {
+		WriteError(w, err)
+		return
+	}
+
+	err = json.Unmarshal(bodyBytes, &req)
+	if err != nil {
+		WriteError(w, err)
+		return
+	}
+
+	reqValid := e.ValidRequest(req, tableName)
+	idx, err := e.CreateRecord(reqValid, tableName)
+	if err != nil {
+		WriteError(w, err)
+		return
+	}
+
+	primaryKey := e.GetPrimaryKey(tableName)
+	resp := Response{
+		"response": Response{
+			primaryKey: idx,
+		},
+	}
+
+	writeJsonResponse(w, resp)
+
+	// Удобрим эту гору собой, став её углём
 
 }
 
-func UpdateRecord() {
+func UpdateRecord(e *DbExplorer, w http.ResponseWriter, r *http.Request, tableName string, id int) {
+	var req map[string]any
+
+	body := r.Body
+	defer body.Close()
+	bodyBytes, err := io.ReadAll(body)
+	if err != nil {
+		WriteError(w, err)
+		return
+	}
+
+	err = json.Unmarshal(bodyBytes, &req)
+	if err != nil {
+		WriteError(w, err)
+		return
+	}
+
+	idx, err := e.UpdateRecord(req, tableName, id)
+
+	if err != nil {
+		WriteError(w, err)
+		return
+	}
+
+	resp := Response{
+		"response": Response{
+			"updated": idx,
+		},
+	}
+
+	writeJsonResponse(w, resp)
 
 }
 
-func DeleteRecords() {
+func DeleteRecords(e *DbExplorer, w http.ResponseWriter, tableName string, id int) {
+	deleted, err := e.DeleteRecord(tableName, id)
+	if err != nil {
+		WriteError(w, err)
+		return
+	}
 
+	resp := Response{
+		"response": Response{
+			"deleted": deleted,
+		},
+	}
+
+	writeJsonResponse(w, resp)
+
+}
+
+func writeJsonResponse(w http.ResponseWriter, resp Response) {
+	jsonResponse, _ := json.Marshal(resp)
+	w.Header().Set("Content-Type", "application/json")
+	_, err := w.Write(jsonResponse)
+	if err != nil {
+		return
+	}
 }
